@@ -25,7 +25,6 @@ const STATES = {
 
 class CryptomoodSanExporter {
   constructor(type) {
-    this.test = [];
     this.state = STATES.INIT;
     this.proto = null;
     this.subClient = null;
@@ -52,7 +51,7 @@ class CryptomoodSanExporter {
     this.normalizeCandle(sentimentData);
 
     if (force || sentimentData.updated) {
-     // await exporter.sendDataWithKey(sentimentData, "id");
+      await exporter.sendDataWithKey(sentimentData, "id");
     }
   }
 
@@ -215,7 +214,7 @@ class CryptomoodSanExporter {
         allAssets: true
       });
 
-      console.log('added', new Date(windowStart * 1000), new Date(Math.min(windowEnd, upToTimestamp) * 1000));
+      console.log('Processed', new Date(windowStart * 1000), new Date(Math.min(windowEnd, upToTimestamp) * 1000));
       windowStart = windowEnd;
 
       let lastPosition = windowEnd;
@@ -234,9 +233,7 @@ class CryptomoodSanExporter {
     this.state = STATES.PROCESSING_BUFFERED_DATA;
 
     const bufferedTimes = Object.keys(this.buffer).sort();
-    console.log("Buffered", bufferedTimes.length);
     for (const time of bufferedTimes) {
-      console.log("BUFFERED TIME", time);
       for (const candle of this.buffer[time]) {
         await this.onData(candle);
       }
@@ -296,22 +293,6 @@ class CryptomoodSanExporter {
           console.warn("Error while saving position", currentTime)
         }
         break;
-    }
-  }
-
-  testdat() {
-    const interval = 60
-    let lastNumero;
-    let fail = false;
-    for (const time of this.test) {
-      const number = parseInt(time);
-      if (lastNumero) {
-        if (lastNumero + interval !== number) {
-          console.log("error", lastNumero, number);
-          fail = true;
-        }
-      }
-      lastNumero = number;
     }
   }
 }
