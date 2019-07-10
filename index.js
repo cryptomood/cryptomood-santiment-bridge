@@ -57,13 +57,13 @@ class CryptomoodSanExporter {
 
   async run() {
     await exporter.connect();
-    //await exporter.savePosition(null) // reset
+    //await exporter.savePosition(null); // reset
 
     try {
       await this.connectCryptomood();
     } catch (e) {
-      console.log(e);
-      return false;
+      console.log("Cryptomood connection cannot be established", e);
+      process.exit(1);
     }
 
     if (!ONLY_HISTORIC) {
@@ -77,13 +77,13 @@ class CryptomoodSanExporter {
     try {
       await this.processOlderData();
     } catch (e) {
-      console.log(e);
-      return false;
+      console.log("processOlderData unknown error", e);
+      process.exit(1);
     }
 
     this.state = STATES.NORMAL;
     if (ONLY_HISTORIC) {
-      process.exit();
+      process.exit(0);
     }
   }
 
@@ -127,32 +127,14 @@ class CryptomoodSanExporter {
     }))
   }
 
-  async getHistoricRange() {
-    const method = this.type === CANDLE_TYPES.SOCIAL ? this.histClient.HistoricSocialSentimentRange : this.histClient.HistoricNewsSentimentRange;
-
-    return new Promise((resolve, reject) => {
-      method.apply(this.histClient, [null, function (err, req) {
-        if (err) {
-          reject(err);
-        } else {
-          resolve(req);
-        }
-      }]);
-    })
-  }
-
-  async getHistoricData(config) {
-    const method = this.type === CANDLE_TYPES.SOCIAL ? this.histClient.HistoricSocialSentiment : this.histClient.HistoricNewsSentiment;
-
-    return new Promise((resolve, reject) => {
-      method.apply(this.histClient, [config, function (err, req) {
-        if (err) {
-          reject(err);
-        } else {
-          resolve(req.items);
-        }
-      }]);
-    })
+  getHistoricStream(config) {
+    const method = this.type === CANDLE_TYPES.social ? this.histClient.HistoricSocialSentiment : this.histClient.HistoricNewsSentiment;
+    return method.apply(this.histClient, [config, function (err) {
+      if (err) {
+        console.log("Stream cannot be created");
+        process.exit(1);
+      }
+    }]);
   }
 
   /**
@@ -178,8 +160,7 @@ class CryptomoodSanExporter {
     let upToTimestamp;
 
     if (!firstTimestamp) {
-      const possibleDataRange = await this.getHistoricRange();
-      firstTimestamp = parseInt(possibleDataRange.first.seconds);
+      firstTimestamp = 0
     }
 
     let currentTimestamp = new Date();
@@ -197,35 +178,40 @@ class CryptomoodSanExporter {
     currentTimestamp = currentTimestamp.getTime() / 1000;
     upToTimestamp = currentTimestamp + 60;
 
-    console.log("Possible data range", new Date(firstTimestamp * 1000), new Date(upToTimestamp * 1000));
+    console.log("Processing historic data: ", new Date(firstTimestamp * 1000), new Date(upToTimestamp * 1000));
+    const stream = this.getHistoricStream({
+      from: {seconds: firstTimestamp}, // greater or equal condition
+      to: {seconds: upToTimestamp}, // less than condition
+      resolution: "M1",
+      all_assets: true
+    });
 
-    const windowSize = 300; // by 5 minute steps
-
-    let windowStart = firstTimestamp;
-    let windowEnd = windowStart;
-
-    while (windowStart < upToTimestamp) {
-      windowEnd += windowSize;
-
-      const data = await this.getHistoricData({
-        from: {seconds: windowStart}, // greater or equal condition
-        to: {seconds: Math.min(windowEnd, upToTimestamp)}, // less than condition
-        resolution: "M1",
-        allAssets: true
+    const promisifiedStream = () => {
+      return new Promise((resolve, reject) => {
+        stream.on("data", async (historicCandle) => {
+          const candleTimestamp = parseInt(historicCandle.start_time.seconds);
+          console.log("Processing", new Date(candleTimestamp * 1000));
+          await this.onData(historicCandle, true);
+          await exporter.savePosition(candleTimestamp - 60); // to be sure
+        });
+        stream.on("end", () => {
+          console.log("Historic stream ended");
+          resolve();
+        });
+        stream.on("error", (e) => {
+          reject(e);
+        });
       });
+    };
 
-      console.log('Processed', new Date(windowStart * 1000), new Date(Math.min(windowEnd, upToTimestamp) * 1000));
-      windowStart = windowEnd;
-
-      let lastPosition = windowEnd;
-      for (const candle of data) {
-        await this.onData(candle, true);
-        lastPosition = parseInt(candle.start_time) + 60;
-      }
-      await exporter.savePosition(lastPosition);
+    try {
+      await promisifiedStream();
+    } catch (e) {
+      console.log("Historic stream error", e);
+      process.exit(1);
     }
 
-    this.processBuffered();
+    await this.processBuffered();
     console.log('Historical data processed');
   }
 
@@ -258,20 +244,27 @@ class CryptomoodSanExporter {
   }
 
   subscribeToSocialSentiment() {
-    this.sentimentChannel = this.subClient.SubscribeSocialSentiment();
+    this.sentimentChannel = this.subClient.SubscribeSocialSentiment({
+      resolution: "M1",
+      asset_filter: {all_assets: true}
+    });
     this.sentimentChannel.on("data", this.channelCb.bind(this));
+    this.sentimentChannel.on("end", this.channelEndedCb.bind(this));
+    this.sentimentChannel.on("error", this.channelEndedCb.bind(this));
   }
 
   subscribeToNewsSentiment() {
-    this.sentimentChannel = this.subClient.SubscribeSocialSentiment();
+    this.sentimentChannel = this.subClient.SubscribeSocialSentiment({
+      resolution: "M1",
+      asset_filter: {all_assets: true}
+    });
     this.sentimentChannel.on("data", this.channelCb.bind(this));
+    this.sentimentChannel.on("end", this.channelEndedCb.bind(this));
+    this.sentimentChannel.on("error", this.channelEndedCb.bind(this));
   }
 
   async channelCb(candle) {
     const currentTime = parseInt(candle.start_time.seconds);
-    if (candle.resolution !== "M1") {
-      return;
-    }
     switch (this.state) {
       case STATES.PROCESSING_HISTORIC_DATA:
         if (!this.buffer[currentTime]) {
@@ -282,18 +275,19 @@ class CryptomoodSanExporter {
 
       case STATES.PROCESSING_BUFFERED_DATA:
         await this.waitUntilBufferProcessed();
-        this.onData(candle);
+        await this.onData(candle);
         break;
 
       case STATES.NORMAL:
-        this.onData(candle);
-        try {
-          await exporter.savePosition(currentTime);
-        } catch (e) {
-          console.warn("Error while saving position", currentTime)
-        }
+        await this.onData(candle);
+        await exporter.savePosition(currentTime);
         break;
     }
+  }
+
+  channelEndedCb(e) {
+    console.log("Subscription stream error", e);
+    process.exit(1);
   }
 }
 
