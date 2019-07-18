@@ -27,8 +27,8 @@ class CryptomoodSanExporter {
   constructor(type) {
     this.state = STATES.INIT;
     this.proto = null;
-    this.subClient = null;
-    this.histClient = null;
+    this.sentClient = null;
+    this.datasetClient = null;
 
     this.buffer = {};
 
@@ -41,18 +41,18 @@ class CryptomoodSanExporter {
     this.sentimentChannel = null;
   }
 
-  normalizeCandle(sentimentData) {
-    sentimentData.type = this.type;
-    sentimentData.id = this.type + "_" + sentimentData.id;
-    sentimentData.start_time = sentimentData.start_time.seconds;
+  normalizeCandle(candle) {
+    candle.type = this.type;
+    candle.key = `${this.type}_${this.getCandleTimestamp(candle)}_${candle.resolution}_${candle.asset}`;
   }
 
-  async onData(sentimentData, force) {
-    this.normalizeCandle(sentimentData);
+  getCandleTimestamp(candle) {
+    return new Date(Date.parse(`${candle.id.year}-${candle.id.month}-${candle.id.day} ${candle.id.hour}:${candle.id.minute}:00Z`)).getTime() / 1000;
+  }
 
-    if (force || sentimentData.updated) {
-      await exporter.sendDataWithKey(sentimentData, "id");
-    }
+  async onData(candle) {
+    this.normalizeCandle(candle);
+    await exporter.sendDataWithKey(candle, "key");
   }
 
   async run() {
@@ -75,7 +75,9 @@ class CryptomoodSanExporter {
     }
 
     try {
-      await this.processOlderData();
+      const assets = await this.getAllAssets();
+      await this.sleep(2000)
+      await this.processOlderData(assets);
     } catch (e) {
       console.log("processOlderData unknown error", e);
       process.exit(1);
@@ -98,18 +100,18 @@ class CryptomoodSanExporter {
       })
     );
 
-    this.subClient = new this.proto.MessagesProxy(
+    this.sentClient = new this.proto.Sentiments(
       SERVER,
       grpc.credentials.createSsl(fs.readFileSync(CERT_FILE_PATH)),
     );
 
-    this.histClient = new this.proto.HistoricData(
+    this.datasetClient = new this.proto.Dataset(
       SERVER,
       grpc.credentials.createSsl(fs.readFileSync(CERT_FILE_PATH)),
     );
 
     return new Promise((resolve, reject) => {
-      grpc.waitForClientReady(this.subClient, new Date().getTime() + 60000, (err) => {
+      grpc.waitForClientReady(this.sentClient, new Date().getTime() + 60000, (err) => {
         if (err) {
           return reject(err);
         } else {
@@ -117,19 +119,30 @@ class CryptomoodSanExporter {
         }
       });
     }).then(() => new Promise((resolve, reject) => {
-      grpc.waitForClientReady(this.histClient, new Date().getTime() + 60000, (err) => {
+      grpc.waitForClientReady(this.datasetClient, new Date().getTime() + 60000, (err) => {
         if (err) {
           return reject(err);
         } else {
           return resolve();
         }
       });
-    }))
+    }));
+  }
+
+  getAllAssets() {
+    return new Promise((resolve, reject) => {
+      return this.datasetClient.Assets({}, (err, req) => {
+        if (err) {
+          reject(err);
+        }
+        resolve(req);
+      });
+    });
   }
 
   getHistoricStream(config) {
-    const method = this.type === CANDLE_TYPES.social ? this.histClient.HistoricSocialSentiment : this.histClient.HistoricNewsSentiment;
-    return method.apply(this.histClient, [config, function (err) {
+    const method = this.type === CANDLE_TYPES.social ? this.sentClient.HistoricSocialSentiment : this.sentClient.HistoricNewsSentiment;
+    return method.apply(this.sentClient, [config, function (err) {
       if (err) {
         console.log("Stream cannot be created");
         process.exit(1);
@@ -143,7 +156,6 @@ class CryptomoodSanExporter {
    * @returns {Promise<any>}
    */
   sleep(duration) {
-    console.log(`Sleeping - waiting for ${duration}ms (for the second half of current minute)`);
     return new Promise((resolve) => {
       setTimeout(resolve, duration);
     });
@@ -153,7 +165,7 @@ class CryptomoodSanExporter {
    * Until streaming is done on the api side, we need to paginate
    * @returns {Promise<void>}
    */
-  async processOlderData() {
+  async processOlderData(assets) {
     this.state = STATES.PROCESSING_HISTORIC_DATA;
 
     let firstTimestamp = await exporter.getLastPosition();
@@ -165,51 +177,50 @@ class CryptomoodSanExporter {
 
     let currentTimestamp = new Date();
 
-    // waiting for the second halfminute if required - to be sure we wont be missing a candle
-    if (currentTimestamp.getSeconds() < 30) {
-      await this.sleep((30 - currentTimestamp.getSeconds()) * 1000);
-    }
-
-    // rounded to minute - if currentTimestamp is 17:45:01, then upToTimestamp will be 17:46:00
-    // - 45th minute should be (after sleep call) in the storage
-    // the range will be <firstTimestamp; upToTimestamp)
     currentTimestamp.setSeconds(0);
     currentTimestamp.setMilliseconds(0);
     currentTimestamp = currentTimestamp.getTime() / 1000;
     upToTimestamp = currentTimestamp + 60;
 
     console.log("Processing historic data: ", new Date(firstTimestamp * 1000), new Date(upToTimestamp * 1000));
-    const stream = this.getHistoricStream({
-      from: {seconds: firstTimestamp}, // greater or equal condition
-      to: {seconds: upToTimestamp}, // less than condition
-      resolution: "M1",
-      all_assets: true
-    });
 
-    const promisifiedStream = () => {
+    const promisifiedStream = (currentStream) => {
       return new Promise((resolve, reject) => {
-        stream.on("data", async (historicCandle) => {
-          const candleTimestamp = parseInt(historicCandle.start_time.seconds);
-          console.log("Processing", new Date(candleTimestamp * 1000));
-          await this.onData(historicCandle, true);
-          await exporter.savePosition(candleTimestamp - 60); // to be sure
+        const allData = [];
+        currentStream.on("data", async (candle) => {
+          allData.push(candle)
         });
-        stream.on("end", () => {
-          console.log("Historic stream ended");
+        currentStream.on("end", async () => {
+          for (const singleData of allData.reverse()) {
+            await this.onData(singleData);
+          }
           resolve();
         });
-        stream.on("error", (e) => {
+        currentStream.on("error", (e) => {
           reject(e);
         });
       });
     };
 
-    try {
-      await promisifiedStream();
-    } catch (e) {
-      console.log("Historic stream error", e);
-      process.exit(1);
+    for (const wantedAsset of assets.assets) {
+      const stream = this.getHistoricStream({
+        from: {seconds: firstTimestamp}, // greater or equal condition
+        to: {seconds: upToTimestamp}, // less than condition
+        resolution: "M1",
+        asset: wantedAsset.symbol,
+      });
+
+      console.log("Processing historic ", wantedAsset.symbol)
+      try {
+        await promisifiedStream(stream);
+        await this.sleep(2000)
+      } catch (e) {
+        console.log("Historic stream error", e);
+        process.exit(1);
+      }
     }
+
+    console.log("Historic stream ended");
 
     await this.processBuffered();
     console.log('Historical data processed');
@@ -244,27 +255,29 @@ class CryptomoodSanExporter {
   }
 
   subscribeToSocialSentiment() {
-    this.sentimentChannel = this.subClient.SubscribeSocialSentiment({
+    this.sentimentChannel = this.sentClient.SubscribeSocialSentiment({
       resolution: "M1",
-      asset_filter: {all_assets: true}
+      assets_filter: {all_assets: true}
     });
+    console.log("Subscribed to social sentiment candles")
     this.sentimentChannel.on("data", this.channelCb.bind(this));
     this.sentimentChannel.on("end", this.channelEndedCb.bind(this));
     this.sentimentChannel.on("error", this.channelEndedCb.bind(this));
   }
 
   subscribeToNewsSentiment() {
-    this.sentimentChannel = this.subClient.SubscribeSocialSentiment({
+    this.sentimentChannel = this.sentClient.SubscribeSocialSentiment({
       resolution: "M1",
-      asset_filter: {all_assets: true}
+      assets_filter: {all_assets: true}
     });
+    console.log("Subscribed to news sentiment candles")
     this.sentimentChannel.on("data", this.channelCb.bind(this));
     this.sentimentChannel.on("end", this.channelEndedCb.bind(this));
     this.sentimentChannel.on("error", this.channelEndedCb.bind(this));
   }
 
   async channelCb(candle) {
-    const currentTime = parseInt(candle.start_time.seconds);
+    const currentTime = this.getCandleTimestamp(candle);
     switch (this.state) {
       case STATES.PROCESSING_HISTORIC_DATA:
         if (!this.buffer[currentTime]) {

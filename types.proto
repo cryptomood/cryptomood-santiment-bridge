@@ -465,92 +465,13 @@ message Video {
     NamedEntitiesModel named_entities = 8;
 }
 
-service ArticleProcessor {
-    rpc Process (Article) returns (Article) {
-    }
-}
-
-service RedditProcessor {
-    rpc Process (RedditPost) returns (RedditPost) {
-    }
-}
-
-service TwitterProcessor {
-    rpc Process (Tweet) returns (Tweet) {
-    }
-}
-
-service UserMessageProcessor {
-    rpc Process (UserMessage) returns (UserMessage) {
-    }
-}
-
-service YoutubeProcessor {
-    rpc Process (Video) returns (Video) {
-    }
-}
-
-service Sentiment {
-    rpc GetSentiment (BaseModel) returns (SentimentModel) {
-    }
-}
-
 service NamedEntities {
     rpc GetNamedEntities (BaseModel) returns (NamedEntitiesModel) {
     }
 }
 
 /**
-Sentiment message holds informations about aggregated sentiment for specific time window.
-It is emitted every second for each asset and resolution. If your application needs to receive
-sentiment updates for only one specific asset, it need to be filtered on your side .
-*/
-message SentimentCandle {
-    // unique identifier
-    string id = 1;
-
-    // timestamp representing start of the time frame
-    google.protobuf.Timestamp start_time = 2;
-
-    // constant representing time frame width - M1 or H1
-    string resolution = 3;
-
-    // crypto asset
-    string asset = 4;
-
-    // sum of all negative values
-    double negative_sum = 5;
-
-    // counted negative occurrences
-    int32 negative_count = 6;
-
-    // sum of all positive values
-    double positive_sum = 7;
-
-    // counted positive occurrences
-    int32 positive_count = 8;
-
-    // average of sentiments
-    double sentiment_avg = 9;
-
-    // value of sentiment at the start of candle
-    double open_sentiment_average = 10;
-
-    // value of sentiment when the candle is highest
-    double high_sentiment_average = 11;
-
-    // value of sentiment when the candle is lowest
-    double low_sentiment_average = 12;
-
-    // value of sentiment at the end of candle
-    double close_sentiment_average = 13;
-
-    // flag the signalizes that candle was updated
-    bool updated = 14;
-}
-
-/**
-Service for pub-sub message model
+Service for entries streaming
 */
 service MessagesProxy {
     rpc SubscribeArticle (AssetsFilter) returns (stream Article) {
@@ -565,9 +486,9 @@ service MessagesProxy {
     }
     rpc SubscribeBitmex (AssetsFilter) returns (stream BitmexUserMessage) {
     }
-    rpc SubscribeNewsSentiment (CandlesFilter) returns (stream SentimentCandle) {
+    rpc SubscribeTransaction (AssetsFilter) returns (stream Transaction){
     }
-    rpc SubscribeSocialSentiment (CandlesFilter) returns (stream SentimentCandle) {
+    rpc SubscribeVideo (AssetsFilter) returns (stream Video){
     }
 }
 
@@ -577,9 +498,10 @@ message AssetsFilter {
     bool all_assets = 5;
 }
 
-message CandlesFilter {
+message AggregationCandleFilter {
+    // resolution for candle - M1/H1
     string resolution = 1;
-    AssetsFilter asset_filter = 2;
+    AssetsFilter assets_filter = 2;
 }
 
 /**
@@ -593,9 +515,7 @@ message SentimentHistoricRequest {
     // resolution for candle - M1/H1
     string resolution = 3;
     // name of the asset - ie. BTC
-    string asset = 4;
-    bool all_assets = 5;
-}
+    string asset = 4;}
 
 /**
 Each request for historic data should be limited by date
@@ -605,7 +525,6 @@ message HistoricRequest {
     google.protobuf.Timestamp from = 1;
     // unix timestamp for end - excluded from results (
     google.protobuf.Timestamp to = 2;
-
     AssetsFilter filter = 4;
 }
 
@@ -627,53 +546,63 @@ service Dataset {
     }
 }
 
-message DateRange {
-    google.protobuf.Timestamp first = 1;
-    google.protobuf.Timestamp last = 2;
-}
-
 /**
 Service for requesting historic data
 */
 service HistoricData {
-    rpc HistoricSocialSentiment (SentimentHistoricRequest) returns (stream SentimentCandle) {
-    }
-    rpc HistoricNewsSentiment (SentimentHistoricRequest) returns (stream SentimentCandle) {
-    }
     rpc HistoricTweets (HistoricRequest) returns (stream Tweet) {
     }
     rpc HistoricArticles (HistoricRequest) returns (stream Article) {
     }
     rpc HistoricRedditPosts (HistoricRequest) returns (stream RedditPost) {
     }
-    rpc HistoricTopics (HistoricRequest) returns (stream TopicsSnapshotWithNews) {
+    rpc HistoricTransactions (HistoricRequest) returns (stream Transaction) {
     }
-    rpc HistoricSocialSentimentRange (google.protobuf.Empty) returns (DateRange) {
+    rpc HistoricVideos (HistoricRequest) returns (stream Video){
     }
-    rpc HistoricNewsSentimentRange (google.protobuf.Empty) returns (DateRange) {
-    }
-
 }
 
-message Topic {
+service Sentiments {
+    rpc HistoricSocialSentiment (SentimentHistoricRequest) returns (stream AggregationCandle) {
+    }
+    rpc HistoricNewsSentiment (SentimentHistoricRequest) returns (stream AggregationCandle) {
+    }
+    rpc SubscribeSocialSentiment (AggregationCandleFilter) returns (stream AggregationCandle) {
+    }
+    rpc SubscribeNewsSentiment (AggregationCandleFilter) returns (stream AggregationCandle) {
+    }
+}
+
+message Transaction {
     string id = 1;
-    string title = 2;
-    string summary = 3;
-    google.protobuf.Timestamp timestamp = 4;
-    repeated string news = 5;
-    repeated string assets = 6;
-    double weight = 7;
-    double credibility = 8;
-    double importance = 9;
+    string hash = 2;
+    string from_address = 3;
+    string to_address = 4;
+    string from_owner = 5;
+    string to_owner = 6;
+    google.protobuf.Timestamp time = 7;
+    string comment = 8;
+    string asset = 9;
+    double size = 10;
+    double USD_size = 11;
 }
 
-message TopicsSnapshot {
-    string id = 1;
-    google.protobuf.Timestamp timestamp = 2;
-    repeated Topic topics = 3;
+message AggId {
+    int32 year = 1;
+    int32 month = 2;
+    int32 day = 3;
+    int32 hour = 4;
+    int32 minute = 5;
 }
 
-message TopicsSnapshotWithNews {
-    TopicsSnapshot snapshot = 1;
-    repeated Article news = 2;
+message AggregationCandle {
+    AggId id = 1;
+    string asset = 2;
+    string resolution = 3;
+    int64 pv = 4;
+    int64 nv = 5;
+    double ps = 6;
+    double ns = 7;
+    double a = 8;
 }
+
