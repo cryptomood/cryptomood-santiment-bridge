@@ -19,8 +19,25 @@ const CANDLE_TYPES = {
 const STATES = {
   INIT: -1,
   PROCESSING_HISTORIC_DATA: 0,
-  PROCESSING_BUFFERED_DATA: 1,
   NORMAL: 2,
+};
+
+const flatCandleSchema = {
+  asset: "", // symbol
+  id: "", // <type>_<timestamp>_<resolution>_<asset>
+  negative_count: 0,
+  negative_sum: 0.0,
+  positive_count: 0,
+  positive_sum: 0.0,
+  resolution: "", // M1 or H1
+  sentiment_avg: 0.0,
+  start_time: "", // unix timestamp in string
+  type: "", // social or news
+  updated: true,
+  open_sentiment_average: 0.0,
+  high_sentiment_average: 0.0,
+  low_sentiment_average: 0.0,
+  close_sentiment_average: 0.0,
 };
 
 class CryptomoodSanExporter {
@@ -29,8 +46,6 @@ class CryptomoodSanExporter {
     this.proto = null;
     this.sentClient = null;
     this.datasetClient = null;
-
-    this.buffer = {};
 
     if (!CANDLE_TYPES[type]) {
       throw new Error("unknown candle type");
@@ -42,17 +57,35 @@ class CryptomoodSanExporter {
   }
 
   normalizeCandle(candle) {
-    candle.type = this.type;
-    candle.key = `${this.type}_${this.getCandleTimestamp(candle)}_${candle.resolution}_${candle.asset}`;
+    const timestamp = this.getCandleTimestamp(candle).toString();
+    return {
+      ...flatCandleSchema,
+      asset: candle.asset,
+      id: `${this.type}_${timestamp}_${candle.resolution}_${candle.asset}`,
+      negative_count: parseInt(candle.nv, 10),
+      negative_sum: candle.ns,
+      positive_count: parseInt(candle.pv, 10),
+      positive_sum: candle.ps,
+      resolution: candle.resolution,
+      sentiment_avg: candle.a,
+      start_time: timestamp,
+      type: this.type,
+    };
   }
 
+  /**
+   * Aggregated candles does not contain timestamp in form of simple scalar value - it has to be deducted from Id field
+   * @param candle
+   * @returns {number}
+   */
   getCandleTimestamp(candle) {
     return new Date(Date.parse(`${candle.id.year}-${candle.id.month}-${candle.id.day} ${candle.id.hour}:${candle.id.minute}:00Z`)).getTime() / 1000;
   }
 
   async onData(candle) {
-    this.normalizeCandle(candle);
-    await exporter.sendDataWithKey(candle, "key");
+    const flatCandle = this.normalizeCandle(candle);
+    await exporter.sendDataWithKey(flatCandle, "id");
+    return flatCandle;
   }
 
   async run() {
@@ -75,8 +108,8 @@ class CryptomoodSanExporter {
     }
 
     try {
+      await this.sleep(2000);
       const assets = await this.getAllAssets();
-      await this.sleep(2000)
       await this.processOlderData(assets);
     } catch (e) {
       console.log("processOlderData unknown error", e);
@@ -89,6 +122,10 @@ class CryptomoodSanExporter {
     }
   }
 
+  /**
+   * Connects to cryptomood api server and creates required clients
+   * @returns {Promise<any | never>}
+   */
   connectCryptomood() {
     this.proto = grpc.loadPackageDefinition(
       protoLoader.loadSync(PROTO_FILE_PATH, {
@@ -129,6 +166,10 @@ class CryptomoodSanExporter {
     }));
   }
 
+  /**
+   * Wrapper around Dataset.Assets request
+   * @returns {Promise<any>}
+   */
   getAllAssets() {
     return new Promise((resolve, reject) => {
       return this.datasetClient.Assets({}, (err, req) => {
@@ -140,6 +181,11 @@ class CryptomoodSanExporter {
     });
   }
 
+  /**
+   * Wrapper around Sentiments.HistoricSocialSentiment request
+   * @param config
+   * @returns {*}
+   */
   getHistoricStream(config) {
     const method = this.type === CANDLE_TYPES.social ? this.sentClient.HistoricSocialSentiment : this.sentClient.HistoricNewsSentiment;
     return method.apply(this.sentClient, [config, function (err) {
@@ -203,6 +249,7 @@ class CryptomoodSanExporter {
     };
 
     for (const wantedAsset of assets.assets) {
+      await this.sleep(1000);
       const stream = this.getHistoricStream({
         from: {seconds: firstTimestamp}, // greater or equal condition
         to: {seconds: upToTimestamp}, // less than condition
@@ -210,48 +257,17 @@ class CryptomoodSanExporter {
         asset: wantedAsset.symbol,
       });
 
-      console.log("Processing historic ", wantedAsset.symbol)
+      console.log("Processing historic ", wantedAsset.symbol);
       try {
         await promisifiedStream(stream);
-        await this.sleep(2000)
       } catch (e) {
         console.log("Historic stream error", e);
         process.exit(1);
       }
     }
 
-    console.log("Historic stream ended");
-
-    await this.processBuffered();
+    await exporter.savePosition(currentTimestamp);
     console.log('Historical data processed');
-  }
-
-  async processBuffered() {
-    this.state = STATES.PROCESSING_BUFFERED_DATA;
-
-    const bufferedTimes = Object.keys(this.buffer).sort();
-    for (const time of bufferedTimes) {
-      for (const candle of this.buffer[time]) {
-        await this.onData(candle);
-      }
-    }
-
-    this.state = STATES.NORMAL;
-  }
-
-  /**
-   * Will stop any incoming candle while processing buffered items
-   * @returns {Promise<*>}
-   */
-  async waitUntilBufferProcessed() {
-    return new Promise((resolve) => {
-      var int = setInterval(() => {
-        if (this.state === STATES.NORMAL) {
-          clearInterval(int);
-          resolve();
-        }
-      }, 1000);
-    });
   }
 
   subscribeToSocialSentiment() {
@@ -259,7 +275,7 @@ class CryptomoodSanExporter {
       resolution: "M1",
       assets_filter: {all_assets: true}
     });
-    console.log("Subscribed to social sentiment candles")
+    console.log("Subscribed to social sentiment candles");
     this.sentimentChannel.on("data", this.channelCb.bind(this));
     this.sentimentChannel.on("end", this.channelEndedCb.bind(this));
     this.sentimentChannel.on("error", this.channelEndedCb.bind(this));
@@ -270,30 +286,27 @@ class CryptomoodSanExporter {
       resolution: "M1",
       assets_filter: {all_assets: true}
     });
-    console.log("Subscribed to news sentiment candles")
+    console.log("Subscribed to news sentiment candles");
     this.sentimentChannel.on("data", this.channelCb.bind(this));
     this.sentimentChannel.on("end", this.channelEndedCb.bind(this));
     this.sentimentChannel.on("error", this.channelEndedCb.bind(this));
   }
 
+  /**
+   * Depending on the bridge state the candle's time will be used to update last timestamp
+   * @param candle
+   * @returns {Promise<void>}
+   */
   async channelCb(candle) {
-    const currentTime = this.getCandleTimestamp(candle);
     switch (this.state) {
       case STATES.PROCESSING_HISTORIC_DATA:
-        if (!this.buffer[currentTime]) {
-          this.buffer[currentTime] = [];
-        }
-        this.buffer[currentTime].push(candle);
-        break;
-
-      case STATES.PROCESSING_BUFFERED_DATA:
-        await this.waitUntilBufferProcessed();
         await this.onData(candle);
+        // purposely not saving position
         break;
 
       case STATES.NORMAL:
-        await this.onData(candle);
-        await exporter.savePosition(currentTime);
+        const flatCandle = await this.onData(candle);
+        await exporter.savePosition(parseInt(flatCandle.start_time, 10));
         break;
     }
   }

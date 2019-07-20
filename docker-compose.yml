@@ -21,5 +21,5 @@ services:
       CRYPTOMOOD_URL: santiment.api.cryptomood.com:30002
       CERT_FILE_PATH: "./cert.pem"
       PROTO_FILE_PATH: "./types.proto"
-      ONLY_HISTORIC: 1
+      ONLY_HISTORIC: 0
       CANDLE_TYPE: social
