@@ -17,3 +17,4 @@ Check the `docker-compose.yml` file for env variables.
 | PROTO_FILE_PATH | ./types.proto | path to definitions |
 | ONLY_HISTORIC | 0 | 1 = will only process historic data, 0 = same as 1, but will also subscribe for new data |
 | CANDLE_TYPE | social | social or news |
+| RESET_POSITION | 1564617600 | resets the last position of exporter to specific unix timestamp |

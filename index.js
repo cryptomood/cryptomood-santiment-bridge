@@ -10,6 +10,7 @@ const CERT_FILE_PATH = process.env.CERT_FILE_PATH;
 const PROTO_FILE_PATH = process.env.PROTO_FILE_PATH;
 const ONLY_HISTORIC = process.env.ONLY_HISTORIC === "1";
 const CANDLE_TYPE = process.env.CANDLE_TYPE;
+const RESET_POSITION = process.env.RESET_POSITION === "" ? false : parseInt(process.env.RESET_POSITION, 10);
 
 const CANDLE_TYPES = {
   news: 'news',
@@ -90,7 +91,11 @@ class CryptomoodSanExporter {
 
   async run() {
     await exporter.connect();
-    //await exporter.savePosition(null); // reset
+
+    if (RESET_POSITION !== false) {
+      console.log("Resetting position to " + RESET_POSITION);
+      await exporter.savePosition(RESET_POSITION);
+    }
 
     try {
       await this.connectCryptomood();

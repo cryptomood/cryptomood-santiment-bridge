@@ -23,3 +23,4 @@ services:
       PROTO_FILE_PATH: "./types.proto"
       ONLY_HISTORIC: 0
       CANDLE_TYPE: social
+      RESET_POSITION: ""
